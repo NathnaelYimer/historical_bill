@@ -1,0 +1,8 @@
+venv/
+.aws-sam/
+.qodo/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log

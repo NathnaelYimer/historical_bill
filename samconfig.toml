@@ -1,0 +1,56 @@
+version = 0.1
+
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "ny-historical-orders-etl-textract-default"
+resolve_s3 = true
+s3_prefix = "ny-historical-orders-etl-textract-default"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+image_repositories = []
+parameter_overrides = """
+    ENV="test"
+    S3BucketName="politicai-ny-past-etl-textract-default"
+    DBSecretName="prod/Politicai/etluser"
+    DBSecretARN="arn:aws:secretsmanager:us-east-1:454054844785:secret:prod/Politicai/etluser-Dh1DQD"
+"""
+
+[prod.deploy]
+[prod.deploy.parameters]
+stack_name = "ny-historical-orders-etl-textract-prod"
+resolve_s3 = true
+s3_prefix = "ny-historical-orders-etl-textract-prod"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = """
+    ENV="prod"
+    S3BucketName="politicai-ny-past-etl-textract-prod"
+    DBSecretName="prod/Politicai/etluser"
+    DBSecretARN="arn:aws:secretsmanager:us-east-1:454054844785:secret:prod/Politicai/etluser-Dh1DQD"
+"""
+image_repositories = []
+
+[test.deploy]
+[test.deploy.parameters]
+stack_name = "ny-historical-orders-etl-textract-test"
+resolve_s3 = true
+s3_prefix = "ny-historical-orders-etl-textract-test"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = """
+    ENV="test"
+    S3BucketName="politicai-ny-past-etl-textract-test-v2"
+    DBSecretName="prod/Politicai/etluser"
+    DBSecretARN="arn:aws:secretsmanager:us-east-1:454054844785:secret:prod/Politicai/etluser-Dh1DQD"
+"""
+image_repositories = []
+
+[default.local_invoke]
+[default.local_invoke.parameters]
+parameter_overrides = """
+    ENV="test"
+    S3BucketName="politicai-ny-past-etl-textract-test-v2"
+    DBSecretName="prod/Politicai/etluser"
+    DBSecretARN="arn:aws:secretsmanager:us-east-1:454054844785:secret:prod/Politicai/etluser-Dh1DQD"
+"""

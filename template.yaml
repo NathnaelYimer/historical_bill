@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: NY Historical Bills ETL (Textract Version)
+
+Parameters:
+  ENV:
+    Type: String
+    Description: Deploy environment (possible values test-prod)
+    Default: "test"
+  S3BucketName:
+    Type: String
+    Description: S3 bucket name for storing historical bills data
+    # Removed Default to avoid Template format error
+  DBSecretName:
+    Type: String
+    Description: Name of the AWS Secrets Manager secret containing database credentials
+  DBSecretARN:
+    Type: String
+    Description: ARN of the Secret Manager secret containing database credentials
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 256
+    Runtime: python3.12
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        S3_BUCKET_NAME: !Ref S3BucketName
+        DB_SECRET_NAME: !Ref DBSecretName
+
+Resources:
+  # S3 Bucket for storing historical bills data
+  HistoricalOrdersBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteDebugFilesAfter30Days
+            Status: Enabled
+            Prefix: debug/
+            ExpirationInDays: 30
+          - Id: DeleteTextractInputFilesAfter30Days
+            Status: Enabled
+            Prefix: textract-input/
+            ExpirationInDays: 30
+
+  # IAM Role for Lambda functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub arn:aws:s3:::${S3BucketName}
+                  - !Sub arn:aws:s3:::${S3BucketName}/*
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DBSecretARN
+        - PolicyName: TextractAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - textract:DetectDocumentText
+                  - textract:StartDocumentTextDetection
+                  - textract:GetDocumentTextDetection
+                Resource: '*'
+
+  # IAM Role for Step Functions
+  StepFunctionsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsInvokeLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ScrapeOrdersFunction.Arn
+                  - !GetAtt ProcessOrderDetailsFunction.Arn
+        - PolicyName: StepFunctionsLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  # Scrape Orders Lambda Function
+  ScrapeOrdersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ny_orders_textract-${ENV}
+      CodeUri: .
+      Handler: scrape_historical_orders_ny.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref ENV
+          S3_BUCKET_NAME: !Ref S3BucketName
+          DB_SECRET_NAME: !Ref DBSecretName
+
+  # Process Order Details Lambda Function
+  ProcessOrderDetailsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ny_order_details_textract-${ENV}
+      CodeUri: .
+      Handler: extract_historical_order_details_ny.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900
+      MemorySize: 1024
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref ENV
+          S3_BUCKET_NAME: !Ref S3BucketName
+          DB_SECRET_NAME: !Ref DBSecretName
+
+  # Step Function State Machine
+  ExecutiveOrdersETLStateMachine:
+    Type: AWS::Serverless::StateMachine
+    DependsOn:
+      - ScrapeOrdersFunction
+      - ProcessOrderDetailsFunction
+    Properties:
+      Name: !Sub ny_historical_executive_orders_etl_textract-${ENV}
+      DefinitionUri: step_function.asl.json
+      DefinitionSubstitutions:
+        ExtractOrdersFunctionArn: !GetAtt ScrapeOrdersFunction.Arn
+        ProcessOrdersFunctionArn: !GetAtt ProcessOrderDetailsFunction.Arn
+      Role: !GetAtt StepFunctionsExecutionRole.Arn
+      Type: STANDARD
+
+Outputs:
+  ScrapeOrdersFunction:
+    Description: Scrape Orders Lambda Function ARN
+    Value: !GetAtt ScrapeOrdersFunction.Arn
+  ProcessOrderDetailsFunction:
+    Description: Process Order Details Lambda Function ARN
+    Value: !GetAtt ProcessOrderDetailsFunction.Arn
+  StateMachineArn:
+    Description: State Machine ARN
+    Value: !Ref ExecutiveOrdersETLStateMachine
+  StateMachineConsoleUrl:
+    Description: State Machine Console URL
+    Value: !Sub https://console.aws.amazon.com/states/home?region=${AWS::Region}#/statemachines/view/${ExecutiveOrdersETLStateMachine}

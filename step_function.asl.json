@@ -1,0 +1,55 @@
+{
+  "Comment": "NY Governor Executive Orders ETL State Machine (Textract Version)",
+  "StartAt": "ExtractOrders",
+  "States": {
+    "ExtractOrders": {
+      "Type": "Task",
+      "Resource": "${ExtractOrdersFunctionArn}",
+      "ResultPath": "$.extractOrdersOutput",
+      "Next": "ProcessOrders",
+      "TimeoutSeconds": 330,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "FailState"
+        }
+      ]
+    },
+    "ProcessOrders": {
+      "Type": "Task",
+      "Resource": "${ProcessOrdersFunctionArn}",
+      "Parameters": {
+        "body.$": "States.StringToJson($.extractOrdersOutput.body)"
+      },
+      "End": true,
+      "TimeoutSeconds": 890,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "FailState"
+        }
+      ]
+    },
+    "FailState": {
+      "Type": "Fail",
+      "Error": "ETLFailure",
+      "Cause": "One of the ETL steps failed."
+    }
+  }
+}
