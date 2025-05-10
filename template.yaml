@@ -10,7 +10,6 @@ Parameters:
   S3BucketName:
     Type: String
     Description: S3 bucket name for storing historical bills data
-    # Removed Default to avoid Template format error
   DBSecretName:
     Type: String
     Description: Name of the AWS Secrets Manager secret containing database credentials
@@ -31,7 +30,6 @@ Globals:
         DB_SECRET_NAME: !Ref DBSecretName
 
 Resources:
-  # S3 Bucket for storing historical bills data
   HistoricalOrdersBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -47,7 +45,6 @@ Resources:
             Prefix: textract-input/
             ExpirationInDays: 30
 
-  # IAM Role for Lambda functions
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -93,7 +90,6 @@ Resources:
                   - textract:GetDocumentTextDetection
                 Resource: '*'
 
-  # IAM Role for Step Functions
   StepFunctionsExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -126,7 +122,6 @@ Resources:
                   - logs:PutLogEvents
                 Resource: "*"
 
-  # Scrape Orders Lambda Function
   ScrapeOrdersFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -142,7 +137,6 @@ Resources:
           S3_BUCKET_NAME: !Ref S3BucketName
           DB_SECRET_NAME: !Ref DBSecretName
 
-  # Process Order Details Lambda Function
   ProcessOrderDetailsFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -151,14 +145,13 @@ Resources:
       Handler: extract_historical_order_details_ny.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 900
-      MemorySize: 1024
+      MemorySize: 2048
       Environment:
         Variables:
           ENVIRONMENT: !Ref ENV
           S3_BUCKET_NAME: !Ref S3BucketName
           DB_SECRET_NAME: !Ref DBSecretName
 
-  # Step Function State Machine
   ExecutiveOrdersETLStateMachine:
     Type: AWS::Serverless::StateMachine
     DependsOn:

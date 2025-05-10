@@ -11,8 +11,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from botocore.exceptions import ClientError, BotoCoreError
 from pypdf import PdfReader, PdfWriter
-from sqlalchemy import inspect
-from config import get_db_connection, db_upsert, get_data_from_s3, get_latest_file_from_s3
+from config import get_db_connection, db_upsert, db_insert_or_update
 
 # Configure structured logging
 logging.basicConfig(level=logging.INFO, force=True)
@@ -46,7 +45,7 @@ def download_pdf(pdf_url, temp_dir):
 def upload_to_s3(pdf_path, bucket_name):
     """Upload the PDF to S3 and return the S3 key."""
     try:
-        s3_key = f"textract-input/{os.path.basename(pdf_path)}"
+        s3_key = f"textract-input/{os.path.basename(pdf_path)}_{int(time.time())}.pdf"
         s3_client.upload_file(pdf_path, bucket_name, s3_key)
         logger.info(f"Uploaded PDF to S3: {bucket_name}/{s3_key}")
         return s3_key
@@ -222,7 +221,7 @@ def extract_text_from_pdf(pdf_path, bucket_name):
             logger.error(f"Failed to delete S3 object {s3_key}: {e}")
 
 def process_order(order_id, order_data, temp_dir, engine, bucket_name, max_retries=3):
-    """Process a single order: download, extract, upsert with retries."""
+    """Process a single order: download, extract, insert with retries."""
     logger.info(f"Processing order {order_id}")
 
     try:
@@ -244,6 +243,7 @@ def process_order(order_id, order_data, temp_dir, engine, bucket_name, max_retri
         'order_num': order_num
     }
 
+    # Upsert into ny.executive_orders (assumes unique constraint on order_id)
     try:
         db_upsert(engine, 'executive_orders', order_entry, conflict_key=['order_id'], schema='ny')
         logger.info(f"Upserted executive order {order_id}")
@@ -258,6 +258,7 @@ def process_order(order_id, order_data, temp_dir, engine, bucket_name, max_retri
 
     text = extract_text_from_pdf(pdf_path, bucket_name)
 
+    # Prepare data for ny.order_texts
     text_entry = {
         'order_id': order_id,
         'text': text,
@@ -268,10 +269,12 @@ def process_order(order_id, order_data, temp_dir, engine, bucket_name, max_retri
         'row_updt_user': 'lambda'
     }
 
+    # Insert or update into ny.order_texts using the new function
+    # This handles tables without unique constraints
     for attempt in range(max_retries):
         try:
-            db_upsert(engine, 'order_texts', text_entry, conflict_key=['order_id'], schema='ny')
-            logger.info(f"Upserted order text {order_id}")
+            db_insert_or_update(engine, 'order_texts', text_entry, conflict_key='order_id', schema='ny')
+            logger.info(f"Inserted/updated order text for {order_id}")
             return True
         except Exception as e:
             logger.error(f"Attempt {attempt + 1}/{max_retries} failed for {order_id}: {e}")
@@ -280,54 +283,35 @@ def process_order(order_id, order_data, temp_dir, engine, bucket_name, max_retri
                 return False
             time.sleep(2 ** attempt)  # Exponential backoff
 
-def verify_table_schema(engine):
-    """Verify that the database schema has the required constraints."""
-    inspector = inspect(engine)
-    constraints = inspector.get_unique_constraints('order_texts', schema='ny')
-    if not any(c['column_names'] == ['order_id'] for c in constraints):
-        logger.error("No unique constraint on order_id in ny.order_texts")
-        raise RuntimeError("Invalid table schema: missing unique constraint on order_id")
-
 def lambda_handler(event, context):
-    """AWS Lambda main handler."""
-    logger.info("Lambda triggered")
+    """AWS Lambda main handler for processing a single order."""
+    logger.info(f"Lambda triggered with event: {json.dumps(event, indent=2)}")
 
     try:
         bucket_name = os.environ.get('S3_BUCKET_NAME')
         if not bucket_name:
             raise ValueError("Environment variable 'S3_BUCKET_NAME' not set")
 
-        file_name = event.get('compiled_file_name') or get_latest_file_from_s3()
-        if not file_name:
-            raise ValueError("No file name provided and no latest file found in S3")
-
-        orders_data, _ = get_data_from_s3(bucket_name, file_name)
-        if not orders_data:
-            logger.warning("No orders found to process")
-            return {'statusCode': 200, 'body': json.dumps({'message': 'No orders to process'})}
+        order_id = event.get('order_id')
+        order_data = event.get('order_data')
+        if not order_id or not order_data:
+            raise ValueError("Missing order_id or order_data in event")
 
         engine = get_db_connection()
         if not engine:
             raise RuntimeError("Database connection failed")
 
-        # Verify database schema
-        verify_table_schema(engine)
-
         with tempfile.TemporaryDirectory() as temp_dir:
-            processed, failed = 0, 0
-
-            for order_id, order_data in orders_data.items():
-                if process_order(order_id, order_data, temp_dir, engine, bucket_name):
-                    processed += 1
-                else:
-                    failed += 1
-
-            logger.info(f"Processing complete. Success: {processed}, Failed: {failed}")
-
-        return {
-            'statusCode': 200,
-            'body': json.dumps({'message': 'Done', 'processed_orders': processed, 'failed_orders': failed})
-        }
+            success = process_order(order_id, order_data, temp_dir, engine, bucket_name)
+            if success:
+                logger.info(f"Successfully processed order {order_id}")
+                return {
+                    'statusCode': 200,
+                    'body': json.dumps({'message': f'Processed order {order_id}', 'order_id': order_id})
+                }
+            else:
+                logger.error(f"Failed to process order {order_id}")
+                raise RuntimeError(f"Failed to process order {order_id}")
 
     except ValueError as e:
         logger.error(f"ValueError: {e}")

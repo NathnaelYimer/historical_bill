@@ -6,7 +6,7 @@
       "Type": "Task",
       "Resource": "${ExtractOrdersFunctionArn}",
       "ResultPath": "$.extractOrdersOutput",
-      "Next": "ProcessOrders",
+      "Next": "ParseResponse",
       "TimeoutSeconds": 330,
       "Retry": [
         {
@@ -23,22 +23,79 @@
         }
       ]
     },
-    "ProcessOrders": {
-      "Type": "Task",
-      "Resource": "${ProcessOrdersFunctionArn}",
+    "ParseResponse": {
+      "Type": "Pass",
       "Parameters": {
         "body.$": "States.StringToJson($.extractOrdersOutput.body)"
       },
-      "End": true,
-      "TimeoutSeconds": 890,
-      "Retry": [
+      "ResultPath": "$.parsedOutput",
+      "Next": "CheckForOrders"
+    },
+    "CheckForOrders": {
+      "Type": "Choice",
+      "Choices": [
         {
-          "ErrorEquals": ["States.ALL"],
-          "IntervalSeconds": 2,
-          "MaxAttempts": 3,
-          "BackoffRate": 2.0
+          "Variable": "$.parsedOutput.body.orders",
+          "IsPresent": true,
+          "Next": "ProcessOrders"
         }
       ],
+      "Default": "NoOrdersToProcess"
+    },
+    "NoOrdersToProcess": {
+      "Type": "Pass",
+      "Result": {
+        "message": "No orders found to process"
+      },
+      "End": true
+    },
+    "ProcessOrders": {
+      "Type": "Map",
+      "ItemsPath": "$.parsedOutput.body.orders",
+      "MaxConcurrency": 10,
+      "Parameters": {
+        "order.$": "$$.Map.Item.Value",
+        "bucket_name.$": "$.parsedOutput.body.bucket_name",
+        "compiled_file_name.$": "$.parsedOutput.body.compiled_file_name"
+      },
+      "Iterator": {
+        "StartAt": "ProcessSingleOrder",
+        "States": {
+          "ProcessSingleOrder": {
+            "Type": "Task",
+            "Resource": "${ProcessOrdersFunctionArn}",
+            "Parameters": {
+              "order_id.$": "$.order.order_id",
+              "order_data.$": "$.order",
+              "bucket_name.$": "$.bucket_name",
+              "compiled_file_name.$": "$.compiled_file_name"
+            },
+            "End": true,
+            "TimeoutSeconds": 900,
+            "Retry": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "ResultPath": "$.error",
+                "Next": "Continue"
+              }
+            ]
+          },
+          "Continue": {
+            "Type": "Pass",
+            "End": true
+          }
+        }
+      },
+      "End": true,
+      "ResultPath": "$.processOrdersOutput",
       "Catch": [
         {
           "ErrorEquals": ["States.ALL"],

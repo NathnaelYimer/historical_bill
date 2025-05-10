@@ -65,9 +65,13 @@ def get_db_connection():
         return None
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-def db_upsert(engine, table_name, data, conflict_key, schema=None):
+def db_upsert(engine, table_name, data, conflict_key=None, schema=None):
     """
-    Perform an upsert operation into the specified table with retries.
+    Perform an upsert or insert operation into the specified table with retries.
+    If conflict_key is None, performs an insert without conflict handling.
+    
+    Note: This function requires a unique constraint on the conflict_key column in the database.
+    For tables without unique constraints, use db_insert_or_update instead.
     """
     if not engine:
         logger.error("No database engine provided for upsert")
@@ -86,22 +90,80 @@ def db_upsert(engine, table_name, data, conflict_key, schema=None):
         placeholders = ', '.join([f':{col}' for col in columns])
         insert_query = f"INSERT INTO {full_table_name} ({', '.join(columns)}) VALUES ({placeholders})"
 
-        # Prepare the update statement for conflict
-        conflict_columns = conflict_key if isinstance(conflict_key, list) else [conflict_key]
-        conflict_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in columns if col not in conflict_columns])
-        on_conflict_query = f" ON CONFLICT ({', '.join(conflict_columns)}) DO UPDATE SET {conflict_clause}"
-
-        # Combine the full query
-        full_query = f"{insert_query} {on_conflict_query}"
+        # Handle upsert if conflict_key is provided
+        if conflict_key:
+            conflict_columns = conflict_key if isinstance(conflict_key, list) else [conflict_key]
+            conflict_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in columns if col not in conflict_columns])
+            on_conflict_query = f" ON CONFLICT ({', '.join(conflict_columns)}) DO UPDATE SET {conflict_clause}"
+            full_query = f"{insert_query} {on_conflict_query}"
+        else:
+            full_query = insert_query
 
         with engine.connect() as connection:
             with connection.begin():  # Ensure transaction
                 connection.execute(text(full_query), data)
-        logger.info(f"Successfully upserted data into {full_table_name}")
+        logger.info(f"Successfully inserted/upserted data into {full_table_name}")
         return True
     except Exception as e:
-        logger.error(f"Failed to upsert into {full_table_name}: {e}")
+        logger.error(f"Failed to insert/upsert into {full_table_name}: {e}")
         raise  # Re-raise for retry
+
+def db_insert_or_update(engine, table_name, data, conflict_key=None, schema=None):
+    """
+    Insert or update data in the specified table based on the conflict_key.
+    If conflict_key is provided, it checks for existence and updates if exists, else inserts.
+    
+    This function is designed for tables without unique constraints where db_upsert cannot be used.
+    
+    Args:
+        engine: SQLAlchemy engine object
+        table_name: Name of the table (e.g., 'order_texts')
+        data: Dictionary containing the row data
+        conflict_key: Column name to check for conflicts (e.g., 'order_id')
+        schema: Optional schema name (e.g., 'ny')
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not engine:
+        logger.error("No database engine provided for insert/update")
+        return False
+
+    full_table_name = f"{schema}.{table_name}" if schema else table_name
+
+    try:
+        with engine.connect() as connection:
+            with connection.begin():  # Start a transaction
+                if conflict_key:
+                    # Check if the record exists
+                    select_query = text(f"SELECT 1 FROM {full_table_name} WHERE {conflict_key} = :value")
+                    result = connection.execute(select_query, {"value": data[conflict_key]}).fetchone()
+
+                    if result:
+                        # Update existing record
+                        set_clause = ", ".join([f"{col} = :{col}" for col in data.keys() if col != conflict_key])
+                        update_query = text(f"UPDATE {full_table_name} SET {set_clause} WHERE {conflict_key} = :value")
+                        connection.execute(update_query, {**data, "value": data[conflict_key]})
+                        logger.info(f"Updated data in {full_table_name} for {conflict_key}: {data[conflict_key]}")
+                    else:
+                        # Insert new record
+                        columns = list(data.keys())
+                        placeholders = ", ".join([f":{col}" for col in columns])
+                        insert_query = text(f"INSERT INTO {full_table_name} ({', '.join(columns)}) VALUES ({placeholders})")
+                        connection.execute(insert_query, data)
+                        logger.info(f"Inserted data into {full_table_name} for {conflict_key}: {data[conflict_key]}")
+                else:
+                    # Regular insert (no conflict check)
+                    columns = list(data.keys())
+                    placeholders = ", ".join([f":{col}" for col in columns])
+                    insert_query = text(f"INSERT INTO {full_table_name} ({', '.join(columns)}) VALUES ({placeholders})")
+                    connection.execute(insert_query, data)
+                    logger.info(f"Inserted data into {full_table_name}")
+
+        return True
+    except Exception as e:
+        logger.error(f"Failed to insert/update into {full_table_name}: {e}")
+        return False
 
 def save_to_s3(data, bucket_name):
     """

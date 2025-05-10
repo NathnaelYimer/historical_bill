@@ -32,7 +32,7 @@ def parse_date(date_str):
 
 def extract_historical_orders():
     """
-    Extracts historical executive orders from the specified URL and returns a dictionary of order data.
+    Extracts historical executive orders from the specified URL and returns a list of order data.
     """
     logger.info("Starting extraction of historical executive orders...")
     logger.info(f"Fetching URL: {BASE_URL}")
@@ -55,9 +55,9 @@ def extract_historical_orders():
 
     if not sections:
         logger.warning("No sections found on the page")
-        return {}
+        return []
 
-    orders_data = {}
+    orders_data = []
     total_links_processed = 0
     total_links_skipped = 0
 
@@ -95,11 +95,70 @@ def extract_historical_orders():
                 if not seg:
                     continue
 
-                # Handle the first order in the segment (e.g., "Executive Order No. 1, issued January 1, 2011 (Title)")
-                if seg.startswith('Executive Order No.'):
-                    # Regex to match "Executive Order No. X, issued [Date] ([Title])"
+                # Handle multiple orders in one segment
+                if " and Executive Order No." in seg:
+                    # Split by " and Executive Order No."
+                    sub_segments = seg.split(" and Executive Order No.")
+                    # Process first segment normally
+                    first_segment = sub_segments[0]
+                    # Add "Executive Order No." back to the remaining segments
+                    remaining_segments = ["Executive Order No." + s for s in sub_segments[1:]]
+                    # Combine all segments for processing
+                    all_segments = [first_segment] + remaining_segments
+                    
+                    for sub_seg in all_segments:
+                        if sub_seg.startswith('Executive Order No.'):
+                            # Updated regex to match titles in parentheses
+                            match = re.match(
+                                r'Executive Order No\.?\s*([\d.]+),\s*issued\s*([A-Za-z]+\s*\d{1,2},\s*\d{4})\s*(?:\((.*?)\))?',
+                                sub_seg,
+                                re.IGNORECASE
+                            )
+                            if not match:
+                                logger.warning(f"Could not parse order in sub-segment: '{sub_seg}'")
+                                continue
+
+                            order_num = match.group(1)  # e.g., "26" or "26.1"
+                            signed_date = parse_date(match.group(2))  # e.g., "October 6, 2011"
+                            title = match.group(3) if match.group(3) else "No title available"  # e.g., "Statewide Language Access Policy"
+                            
+                            if title == "No title available":
+                                logger.info(f"No title extracted for sub-segment: '{sub_seg}'")
+                            
+                            if link_index >= len(pdf_links):
+                                logger.warning(f"No PDF link available for order number {order_num} in sub-segment: '{sub_seg}'")
+                                total_links_skipped += 1
+                                continue
+                                
+                            pdf_url = pdf_links[link_index]['href']
+                            link_index += 1
+                            
+                            # Generate a unique order_id
+                            order_id = f'NYORDER{order_num.replace(".", "_")}'
+
+                            # Ensure PDF URL is absolute
+                            if not pdf_url.startswith('http'):
+                                pdf_url = f"https://www.governor.ny.gov{pdf_url}"
+
+                            logger.info(f"Processing order: {order_id}, Order Num: {order_num}, Title: {title}, Signed Date: {signed_date}, PDF URL: {pdf_url}")
+
+                            orders_data.append({
+                                'order_id': order_id,
+                                'order_num': order_num,
+                                'title': title,
+                                'signed_date': signed_date,
+                                'pdf_url': pdf_url,
+                                'src': SRC_VALUE,
+                                'governor': governor_name
+                            })
+                            total_links_processed += 1
+                            logger.info(f"Successfully extracted order: {order_id}")
+                
+                # Handle single order in the segment
+                elif seg.startswith('Executive Order No.'):
+                    # Updated regex to match titles in parentheses
                     match = re.match(
-                        r'Executive Order No\.?\s*([\d.]+),\s*issued\s*([A-Za-z]+\s*\d{1,2},\s*\d{4})\s*\((.*?)\)',
+                        r'Executive Order No\.?\s*([\d.]+),\s*issued\s*([A-Za-z]+\s*\d{1,2},\s*\d{4})\s*(?:\((.*?)\))?',
                         seg,
                         re.IGNORECASE
                     )
@@ -109,13 +168,42 @@ def extract_historical_orders():
 
                     order_num = match.group(1)  # e.g., "1" or "147"
                     signed_date = parse_date(match.group(2))  # e.g., "January 1, 2011"
-                    title = match.group(3)  # e.g., "Removing the Barriers to State Government"
+                    title = match.group(3) if match.group(3) else "No title available"  # e.g., "Removing the Barriers to State Government"
+                    
+                    if title == "No title available":
+                        logger.info(f"No title extracted for segment: '{seg}'")
+                    
+                    if link_index >= len(pdf_links):
+                        logger.warning(f"No PDF link available for order number {order_num} in segment: '{seg}'")
+                        total_links_skipped += 1
+                        continue
+                        
                     pdf_url = pdf_links[link_index]['href']
                     link_index += 1
 
+                    # Generate a unique order_id
+                    order_id = f'NYORDER{order_num.replace(".", "_")}'
+
+                    # Ensure PDF URL is absolute
+                    if not pdf_url.startswith('http'):
+                        pdf_url = f"https://www.governor.ny.gov{pdf_url}"
+
+                    logger.info(f"Processing order: {order_id}, Order Num: {order_num}, Title: {title}, Signed Date: {signed_date}, PDF URL: {pdf_url}")
+
+                    orders_data.append({
+                        'order_id': order_id,
+                        'order_num': order_num,
+                        'title': title,
+                        'signed_date': signed_date,
+                        'pdf_url': pdf_url,
+                        'src': SRC_VALUE,
+                        'governor': governor_name
+                    })
+                    total_links_processed += 1
+                    logger.info(f"Successfully extracted order: {order_id}")
+
                 # Handle subsequent orders in the segment (e.g., "147.28, issued October 4, 2019")
                 else:
-                    # Regex to match "[Order Num], issued [Date]"
                     match = re.match(
                         r'([\d.]+),\s*issued\s*([A-Za-z]+\s*\d{1,2},\s*\d{4})',
                         seg,
@@ -127,36 +215,39 @@ def extract_historical_orders():
 
                     order_num = match.group(1)  # e.g., "147.28"
                     signed_date = parse_date(match.group(2))  # e.g., "October 4, 2019"
-                    # Use the title from the main order (not provided for subsequent orders)
-                    title = orders_data[list(orders_data.keys())[-1]]['title'] if orders_data else "No title available"
+                    title = orders_data[-1]['title'] if orders_data else "No title available"  # Use previous title if available
+                    
+                    if title == "No title available":
+                        logger.info(f"No title extracted for subsequent segment: '{seg}'")
+                    
+                    if link_index >= len(pdf_links):
+                        logger.warning(f"No PDF link available for order number {order_num} in segment: '{seg}'")
+                        total_links_skipped += 1
+                        continue
+                        
                     pdf_url = pdf_links[link_index]['href']
                     link_index += 1
 
-                # Skip if no PDF URL is available
-                if link_index > len(pdf_links):
-                    logger.warning(f"No PDF link available for order number {order_num} in segment: '{seg}'")
-                    total_links_skipped += 1
-                    continue
+                    # Generate a unique order_id
+                    order_id = f'NYORDER{order_num.replace(".", "_")}'
 
-                # Generate a unique order_id
-                order_id = f'NYORDER{order_num.replace(".", "_")}'
+                    # Ensure PDF URL is absolute
+                    if not pdf_url.startswith('http'):
+                        pdf_url = f"https://www.governor.ny.gov{pdf_url}"
 
-                # Ensure PDF URL is absolute
-                if not pdf_url.startswith('http'):
-                    pdf_url = f"https://www.governor.ny.gov{pdf_url}"
+                    logger.info(f"Processing order: {order_id}, Order Num: {order_num}, Title: {title}, Signed Date: {signed_date}, PDF URL: {pdf_url}")
 
-                logger.info(f"Processing order: {order_id}, Order Num: {order_num}, Title: {title}, Signed Date: {signed_date}, PDF URL: {pdf_url}")
-
-                orders_data[order_id] = {
-                    'order_num': order_num,
-                    'title': title,
-                    'signed_date': signed_date,
-                    'pdf_url': pdf_url,
-                    'src': SRC_VALUE,
-                    'governor': governor_name  # Add governor name for reference
-                }
-                total_links_processed += 1
-                logger.info(f"Successfully extracted order: {order_id}")
+                    orders_data.append({
+                        'order_id': order_id,
+                        'order_num': order_num,
+                        'title': title,
+                        'signed_date': signed_date,
+                        'pdf_url': pdf_url,
+                        'src': SRC_VALUE,
+                        'governor': governor_name
+                    })
+                    total_links_processed += 1
+                    logger.info(f"Successfully extracted order: {order_id}")
 
     logger.info(f"Processed {total_links_processed} total links, skipped {total_links_skipped} links (no PDFs or parsing issues)")
     logger.info(f"Extracted metadata for {len(orders_data)} historical executive orders")
@@ -191,7 +282,7 @@ def lambda_handler(event, context):
             'statusCode': 200,
             'body': json.dumps({
                 'message': 'Data extraction complete',
-                '.compiled_file_name': file_name,
+                'compiled_file_name': file_name,
                 'bucket_name': bucket_name,
                 'orders': orders_data
             })
